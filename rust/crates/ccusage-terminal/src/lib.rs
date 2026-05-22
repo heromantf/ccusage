@@ -6,6 +6,9 @@ use std::{
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
 const DEFAULT_TERMINAL_WIDTH: usize = 120;
 
 #[cfg(all(unix, target_os = "macos"))]
@@ -465,12 +468,12 @@ pub fn terminal_width() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|width| *width > 0)
-        .or_else(terminal_width_from_ioctl)
+        .or_else(terminal_width_from_os)
         .unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
 #[cfg(unix)]
-fn terminal_width_from_ioctl() -> Option<usize> {
+fn terminal_width_from_os() -> Option<usize> {
     if !io::stdout().is_terminal() {
         return None;
     }
@@ -495,14 +498,79 @@ fn terminal_width_from_ioctl() -> Option<usize> {
     }
 }
 
-#[cfg(not(unix))]
-fn terminal_width_from_ioctl() -> Option<usize> {
+// Windows has no ioctl(TIOCGWINSZ); query the console directly. The visible
+// width is `srWindow.Right - srWindow.Left + 1` (not `dwSize.X`, which is the
+// scrollback buffer width and can exceed the window in classic consoles).
+#[cfg(windows)]
+fn terminal_width_from_os() -> Option<usize> {
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    #[repr(C)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    struct ConsoleScreenBufferInfo {
+        size: Coord,
+        cursor_position: Coord,
+        attributes: u16,
+        window: SmallRect,
+        maximum_window_size: Coord,
+    }
+    let mut info = ConsoleScreenBufferInfo {
+        size: Coord { x: 0, y: 0 },
+        cursor_position: Coord { x: 0, y: 0 },
+        attributes: 0,
+        window: SmallRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        maximum_window_size: Coord { x: 0, y: 0 },
+    };
+    // GetConsoleScreenBufferInfo writes the full struct, so the buffer must
+    // match the real layout even though only `window` is read back.
+    let rc = unsafe {
+        GetConsoleScreenBufferInfo(
+            io::stdout().as_raw_handle(),
+            std::ptr::addr_of_mut!(info).cast(),
+        )
+    };
+    if rc != 0 {
+        let cols = i32::from(info.window.right) - i32::from(info.window.left) + 1;
+        if cols > 0 {
+            return Some(cols as usize);
+        }
+    }
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminal_width_from_os() -> Option<usize> {
     None
 }
 
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     fn ioctl(fd: i32, request: usize, ...) -> i32;
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn GetConsoleScreenBufferInfo(
+        handle: *mut core::ffi::c_void,
+        info: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 pub fn print_box_title(title: &str, style: impl Into<TerminalStyle>) {
