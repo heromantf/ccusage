@@ -487,3 +487,90 @@ fn full_table_columns_include_cache_and_total_token_metrics() {
     );
     assert_eq!(headers.len(), aligns.len());
 }
+
+fn all_daily_row(
+    period: &str,
+    agent: &'static str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
+) -> AllRow {
+    AllRow {
+        period: period.to_string(),
+        agent,
+        models_used: vec![model.to_string()],
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: input_tokens + output_tokens,
+        total_cost: cost,
+        metadata: None,
+        metadata_agents: Some(vec![agent]),
+        agent_breakdowns: None,
+        model_breakdowns: vec![ModelBreakdown {
+            model_name: model.to_string(),
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            cost,
+            ..ModelBreakdown::default()
+        }],
+    }
+}
+
+#[test]
+fn collapses_monthly_agent_breakdowns_into_one_row_per_agent() {
+    let rows = aggregate_rows(
+        vec![
+            all_daily_row(
+                "2026-01-05",
+                "claude",
+                "claude-sonnet-4-20250514",
+                100,
+                50,
+                0.25,
+            ),
+            all_daily_row(
+                "2026-01-12",
+                "claude",
+                "claude-sonnet-4-20250514",
+                200,
+                80,
+                0.50,
+            ),
+            all_daily_row(
+                "2026-01-20",
+                "claude",
+                "claude-opus-4-20250514",
+                300,
+                120,
+                0.75,
+            ),
+            all_daily_row("2026-01-08", "codex", "gpt-5", 10, 5, 0.05),
+        ],
+        AgentReportKind::Monthly,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].period, "2026-01");
+    assert_eq!(rows[0].agent, "all");
+    assert_eq!(rows[0].input_tokens, 610);
+    assert_eq!(rows[0].output_tokens, 255);
+
+    let breakdowns = rows[0].agent_breakdowns.as_ref().unwrap();
+    assert_eq!(
+        breakdowns.len(),
+        2,
+        "monthly breakdowns must collapse to one row per agent, not one per active day"
+    );
+    assert_eq!(breakdowns[0].agent, "claude");
+    assert_eq!(breakdowns[0].period, "2026-01");
+    assert_eq!(breakdowns[0].input_tokens, 600);
+    assert_eq!(breakdowns[0].output_tokens, 250);
+    assert_eq!(breakdowns[0].model_breakdowns.len(), 2);
+    assert_eq!(breakdowns[1].agent, "codex");
+    assert_eq!(breakdowns[1].input_tokens, 10);
+}

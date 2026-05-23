@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -79,8 +79,7 @@ impl AllAccumulator {
     }
 
     pub(super) fn into_row(self, period: String) -> AllRow {
-        let mut agent_breakdowns = self.agent_breakdowns;
-        agent_breakdowns.sort_by(|a, b| a.agent.cmp(b.agent));
+        let agent_breakdowns = coalesce_agent_breakdowns(self.agent_breakdowns, &period);
         let mut model_breakdowns = aggregate_model_breakdowns(&agent_breakdowns);
         model_breakdowns.sort_by(|a, b| b.cost.total_cmp(&a.cost));
         AllRow {
@@ -126,4 +125,57 @@ pub(super) fn aggregate_model_breakdowns(rows: &[AllRow]) -> Vec<ModelBreakdown>
         }
     }
     breakdowns
+}
+
+/// Collapse per-agent breakdown rows so each agent appears once per period.
+///
+/// Monthly and weekly reports load every agent at daily granularity and then
+/// re-bucket the rows here. Without this step an agent with several active
+/// days inside one bucket would render one breakdown row per day, making a
+/// monthly report look like a daily one.
+fn coalesce_agent_breakdowns(rows: Vec<AllRow>, period: &str) -> Vec<AllRow> {
+    let mut grouped = BTreeMap::<&'static str, Vec<AllRow>>::new();
+    for row in rows {
+        grouped.entry(row.agent).or_default().push(row);
+    }
+    grouped
+        .into_iter()
+        .map(|(agent, rows)| merge_agent_breakdown(agent, period.to_string(), &rows))
+        .collect()
+}
+
+fn merge_agent_breakdown(agent: &'static str, period: String, rows: &[AllRow]) -> AllRow {
+    let mut models = BTreeSet::new();
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut cache_creation_tokens = 0;
+    let mut cache_read_tokens = 0;
+    let mut total_tokens = 0;
+    let mut total_cost = 0.0;
+    for row in rows {
+        input_tokens += row.input_tokens;
+        output_tokens += row.output_tokens;
+        cache_creation_tokens += row.cache_creation_tokens;
+        cache_read_tokens += row.cache_read_tokens;
+        total_tokens += row.total_tokens;
+        total_cost += row.total_cost;
+        models.extend(row.models_used.iter().cloned());
+    }
+    let mut model_breakdowns = aggregate_model_breakdowns(rows);
+    model_breakdowns.sort_by(|a, b| b.cost.total_cmp(&a.cost));
+    AllRow {
+        period,
+        agent,
+        models_used: models.into_iter().collect(),
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+        total_tokens,
+        total_cost,
+        metadata: None,
+        metadata_agents: Some(vec![agent]),
+        agent_breakdowns: None,
+        model_breakdowns,
+    }
 }
